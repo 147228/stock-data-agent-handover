@@ -1,0 +1,22 @@
+instock:
+  base_url: "http://127.0.0.1:9988"
+  timeout_seconds: 10
+  max_response_bytes: 20000000
+  allow_remote: false
+  # Empty means fetch-module is blocked. Add only owner-approved read-only modules.
+  allowed_modules: []
+
+analysis:
+  timezone: "Asia/Shanghai"
+  daily_ready_time: "17:45"
+  # Production should point to a versioned exchange calendar CSV with date,is_open.
+  trading_calendar: null
+  required_columns:
+    - code
+    - date
+    - open
+    - high
+    - low
+    - close
+    - volume
+  max_error_samples: 20
