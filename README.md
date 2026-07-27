@@ -1,5 +1,7 @@
 # 股票数据分析 Agent 接手包
 
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+
 一套**不含任何选股策略**的股票数据工具。它主要干五件事：
 
 1. 从公开行情接口同步真实的沪深北A股全市场名单与最新行情快照；
@@ -14,6 +16,37 @@
 
 ---
 
+## 60秒跑出真实A股数据库
+
+只想复现文章里“获取真实A股数据并形成全市场数据库”的读者，先跑这一段：
+
+```bash
+git clone https://github.com/147228/stock-data-agent-handover.git
+cd stock-data-agent-handover
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -e .
+
+stock-data-agent sync-a-share-universe \
+  --database data/a_share.db \
+  --manifest outputs/a_share_universe_manifest.json
+```
+
+命令完成时会直接打印实际入库数。再用下面三条 SQL 验收：
+
+```bash
+sqlite3 data/a_share.db 'SELECT COUNT(*) FROM stock_info;'
+sqlite3 data/a_share.db \
+  'SELECT exchange,COUNT(*) FROM stock_info GROUP BY exchange ORDER BY exchange;'
+sqlite3 data/a_share.db \
+  'SELECT retrieved_at,row_count,pages_fetched FROM sync_runs ORDER BY id DESC LIMIT 1;'
+```
+
+股票数量会随上市、退市变化。文章实测时的4589只、仓库验收时的5532只都只是
+特定时点快照；**永远以数据库查询结果为准，不要把某个数字写死。**
+
+---
+
 ## 一、最快的用法：直接丢给 Agent
 
 不用会写代码。开一个 Agent 对话框，把仓库地址和需求一起丢进去就行：
@@ -24,7 +57,7 @@
 
 ```text
 请阅读这个仓库：https://github.com/147228/stock-data-agent-handover
-按顺序做三件事：
+按顺序做四件事：
 
 1. 读 README 和 docs/ 下的 7 篇文档，搞清楚这套工具有哪些命令、
    哪些边界不能碰（尤其是 docs/07-SECURITY-BOUNDARY.md）。
@@ -71,6 +104,43 @@ pytest
 stock-data-agent --version     # 0.1.0
 stock-data-agent --help
 ```
+
+---
+
+## 架构说明
+
+这不是一个让大模型“凭记忆报股票”的项目。数据获取、完整性检查、落库和指标计算
+都由确定性程序完成，Agent只负责调用工具、读取证据和解释结果。
+
+```mermaid
+flowchart LR
+    U["用户 / Agent"] --> C["stock-data-agent CLI"]
+
+    C --> S["全市场快照路径"]
+    S --> SA["新浪财经<br/>总数接口 + 分页行情接口"]
+    SA --> V["规范化、去重、总数/页数检查"]
+    V --> T["SQLite 临时表 + 事务替换"]
+    T --> DB[("stock_info<br/>sync_runs")]
+    V --> M["manifest<br/>来源、时间、行数、SHA-256"]
+
+    C --> I["历史行情路径"]
+    I --> IA["本地 InStock<br/>只读白名单接口"]
+    IA --> RAW["原始 OHLCV 快照"]
+    RAW --> Q["质量检查 + freshness gate"]
+    Q --> IND["确定性指标计算"]
+    IND --> O["CSV / JSON / HTML 等交付物"]
+```
+
+| 层 | 作用 | 关键边界 |
+|---|---|---|
+| Agent / CLI | 接收任务、编排命令、解释结果 | 不心算指标，不猜缺失数据 |
+| 新浪财经快照 | 获取沪深北A股名单和最新行情 | 公共接口可能限流或改字段，不是稳定官方合约 |
+| InStock | 提供历史行情和本地缓存 | 默认只允许回环地址、GET和模块白名单 |
+| 完整性与新鲜度 | 校验总数、页数、字段、日期 | 不完整、stale、unknown 一律阻断 |
+| SQLite / outputs | 保存当前快照、同步审计和分析结果 | 数据库与行情文件受 `.gitignore` 保护，不上传GitHub |
+
+`sync-a-share-universe` 不要求先部署 InStock：只安装本仓库即可形成全市场SQLite快照。
+需要历史日K、指标或长期自动更新时，再接入 InStock 或其他获准的数据源。
 
 ---
 
@@ -282,6 +352,57 @@ sqlite3 data/a_share.db \
 这一步建立的是全市场**基础信息与最新行情快照**。历史日K仍需从已部署的InStock或
 其他经允许的数据源取得，再交给 `validate / indicators / report` 处理。
 
+#### 如果行情接口频繁报错
+
+先区分错误类型，不要让多个Agent同时反复重跑。当前命令已经内置浏览器
+`User-Agent`、对 `429/500/502/503/504` 的3次退避重试、15秒超时、全量行数校验和
+原子写库；抓到空页、少页或不足4000行时会失败，**不会用残缺数据覆盖上一次成功库**。
+
+按下面顺序处理：
+
+1. **超时、连接重置：** 把单次超时提高到30秒，等一分钟后只重跑一次。
+
+   ```bash
+   stock-data-agent sync-a-share-universe --timeout 30
+   ```
+
+2. **本机代理、证书或连接异常：** 我们实测中过一次代理干扰。仅在确认是代理问题时，
+   临时绕过该域名；不要把关闭代理当成解决 `429` 限流的办法。
+
+   ```bash
+   HTTP_PROXY= HTTPS_PROXY= ALL_PROXY= \
+   NO_PROXY=vip.stock.finance.sina.com.cn,localhost,127.0.0.1 \
+   stock-data-agent sync-a-share-universe --timeout 30
+   ```
+
+3. **`429`、连续 `5xx`：** 停止并发，等待1—3分钟再试。生产环境只让一个定时任务
+   负责同步，其他Agent读取同一个 `data/a_share.db`，不要每个任务各抓一遍。
+
+4. **HTTP 200但返回空列表、`result:null` 或总数对不上：** 把它当上游失败，不要解释成
+   “今天没有股票”。保留上一次成功数据库和失败日志，稍后重试。InStock链路过去采用过
+   30秒超时、语义空响应重试，以及在可配置接口上把页大小提高到1000；新浪接口本身每页
+   上限为100，不要强行改大。
+
+5. **新浪持续不可用：** 可以切到已经部署的本地 InStock。优先读取同日
+   `cn_stock_selection`；若它为空但 `cn_stock_spot` 正常，可将现货行情与最近10天内的
+   基本面快照按股票代码合并，并分别记录 `market_as_of` 和 `fundamentals_as_of`。
+   找不到近期基本面就停止，不能补零后伪装成完整数据。
+
+6. **需要历史日K：** 使用 InStock 缓存，或按数据源许可单独接入 BaoStock 等历史行情源。
+   新来源应写入独立原始快照/表，并记录 `source`、`as_of`、字段口径和行数；不要把不同
+   来源静默拼成同一种数据。
+
+可以把下面这段直接交给Agent：
+
+```text
+如果 sync-a-share-universe 失败：先读取真实错误和现有 sync_runs，不要并发重跑；
+连接类错误用 --timeout 30 单次重试；429/5xx 等待1—3分钟；HTTP 200但空列表、
+result:null、总数或页数不一致都按失败处理，不得覆盖上一次成功数据库。
+若确认是代理问题，临时对 vip.stock.finance.sina.com.cn 绕过代理。
+新浪持续不可用时，先征得我同意再切 InStock，并在结果里明确 source、market_as_of、
+fundamentals_as_of、row_count 和限制；缺近期基本面就停，不许补零或猜测。
+```
+
 ### 退出码
 
 | 码 | 含义 | 建议动作 |
@@ -407,6 +528,9 @@ research/<new-task>/
 | 长假后第一天判成 `stale` | 用的是 `weekday_only` 日历 | 配上 `trading_calendar` CSV |
 | `indicators.csv` 前几十行是空的 | 均线窗口还没攒够数据 | 正常现象，别拿空值当 0 |
 | `report` 退出码 2 但没看到 indicators | 质检失败时默认不写 | 加 `--write-indicators-on-failure` 排查 |
+| `sync-a-share-universe` 超时/连接重置 | 网络、代理或上游抖动 | `--timeout 30` 单次重试；确认代理问题后再绕过 |
+| 接口返回 `429` 或连续 `5xx` | 请求过密或上游异常 | 停止并发，等待1—3分钟，共享一个本地数据库 |
+| 接口HTTP 200但为空或总数对不上 | 语义空响应/分页异常 | 视为失败，保留旧库，不得写成“0只股票” |
 
 ---
 
@@ -429,3 +553,15 @@ research/<new-task>/
 本仓库仅提供数据处理与通用技术指标计算，**不构成任何投资建议**。数据来自公共数据源，可能存在延迟、缺失或错误，请独立判断并自行承担投资风险。
 
 仓库内的现场信息只对快照日期有效。每次接手和事故汇报请重新读取生产状态，不要照抄旧快照。
+
+## 许可证与上游关系
+
+- 本仓库的原创代码和文档按 [Apache License 2.0](LICENSE) 发布，署名信息见
+  [NOTICE](NOTICE)。
+- 本项目参考并对接 [myhhub/stock（InStock）](https://github.com/myhhub/stock)，
+  核对基线为 `b6e0ca2268cfbadd02f5ed052159c187b6670231`；InStock同样采用
+  Apache-2.0。本仓库没有复制或打包其完整源码，InStock自身仍受其原仓库许可和声明约束。
+- 新浪财经、BaoStock及其他数据源的数据、接口、名称和商标不因本仓库的Apache-2.0许可
+  而被重新许可。使用者应自行遵守各数据源条款、频率限制和适用法律。
+- Apache-2.0不提供任何担保；本仓库也不对数据的实时性、完整性、适销性或特定用途适用性
+  作保证。

@@ -1,0 +1,15 @@
+Stock Data Agent Handover
+Copyright 2026 147228 and contributors
+
+This product includes original stock-data adapter code and documentation
+licensed under the Apache License, Version 2.0.
+
+This project interoperates with, but does not vendor the complete source of:
+
+  InStock (myhhub/stock)
+  https://github.com/myhhub/stock
+  Apache License, Version 2.0
+
+Market data retrieved from third-party services is not covered by this
+project's software license. Third-party names and trademarks belong to their
+respective owners.
