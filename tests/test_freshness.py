@@ -3,7 +3,6 @@ from zoneinfo import ZoneInfo
 
 from stock_data_agent.freshness import TradingCalendar, evaluate_freshness, expected_daily_as_of
 
-
 ZONE = ZoneInfo("Asia/Shanghai")
 
 
