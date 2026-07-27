@@ -1,11 +1,12 @@
 # 股票数据分析 Agent 接手包
 
-一套**不含任何选股策略**的股票数据工具。它只干四件事：
+一套**不含任何选股策略**的股票数据工具。它主要干五件事：
 
-1. 检查数据服务活没活；
-2. 检查数据是不是最新交易日的（不新鲜就拦住，不让下游发消息）；
-3. 检查数据本身有没有毛病（缺字段、重复、负价格、OHLC 逻辑错乱）；
-4. 算出通用技术指标，并留下一份可复查的 `manifest.json`。
+1. 从公开行情接口同步真实的沪深北A股全市场名单与最新行情快照；
+2. 检查数据服务活没活；
+3. 检查数据是不是最新交易日的（不新鲜就拦住，不让下游发消息）；
+4. 检查数据本身有没有毛病（缺字段、重复、负价格、OHLC 逻辑错乱）；
+5. 算出通用技术指标，并留下一份可复查的 `manifest.json`。
 
 基于开源项目 [myhhub/stock](https://github.com/myhhub/stock)（InStock）。
 
@@ -28,10 +29,13 @@
 1. 读 README 和 docs/ 下的 7 篇文档，搞清楚这套工具有哪些命令、
    哪些边界不能碰（尤其是 docs/07-SECURITY-BOUNDARY.md）。
 2. 在本地 clone 下来，建 venv，pip install -e '.[dev]'，跑 pytest，
-   确认 14 个测试全绿。
+   确认全部测试通过。
 3. 用 examples/ohlcv_sample.csv 跑通 validate -> indicators -> report 三步，
    把 outputs/run-001/manifest.json 里的 freshness、row_count、input_sha256
    讲给我听。
+4. 运行 stock-data-agent sync-a-share-universe，把真实沪深北A股全市场快照
+   写入 data/a_share.db；完成后查询 stock_info 的行数、最新同步时间和前5行，
+   并告诉我实际入库数量。数量必须来自数据库，不得照抄文档。
 
 规矩：freshness 是 stale 或 unknown 时必须直接告诉我并停下，
 不许自己补数据、不许猜、不许给买卖建议。
@@ -61,7 +65,7 @@ python -m pip install -e '.[dev]'
 pytest
 ```
 
-`pytest` 应该输出 `14 passed`。装好后 `stock-data-agent` 命令即可用：
+当前版本 `pytest` 应输出 `16 passed`。装好后 `stock-data-agent` 命令即可用：
 
 ```bash
 stock-data-agent --version     # 0.1.0
@@ -70,7 +74,7 @@ stock-data-agent --help
 
 ---
 
-## 三、五条命令
+## 三、六条命令
 
 ### ① `health` — 看服务活没活
 
@@ -248,6 +252,35 @@ outputs/run-001/
 ```
 
 质检报错时默认不写 indicators（避免脏数据流下去）。确实要看中间结果时加 `--write-indicators-on-failure`。
+
+### ⑥ `sync-a-share-universe` — 获取真实沪深北A股并写入SQLite
+
+这条命令会分页读取公开行情接口，把当时可获得的全部沪深北A股基础信息和最新行情
+原子写入SQLite。股票数量会随上市、退市而变化，**不要把4589或其他历史数字写死成
+验收标准**；程序只接受不少于4000行的完整快照，并同时保存同步记录和内容哈希。
+
+```bash
+stock-data-agent sync-a-share-universe \
+  --database data/a_share.db \
+  --manifest outputs/a_share_universe_manifest.json
+```
+
+成功后可以直接验收：
+
+```bash
+sqlite3 data/a_share.db 'SELECT COUNT(*) FROM stock_info;'
+sqlite3 data/a_share.db \
+  'SELECT code,name,exchange,last_price,change_pct,retrieved_at FROM stock_info LIMIT 5;'
+sqlite3 data/a_share.db \
+  'SELECT retrieved_at,row_count,pages_fetched,records_sha256 FROM sync_runs ORDER BY id DESC LIMIT 1;'
+```
+
+`stock_info` 包含代码、名称、交易所、最新价、涨跌幅、成交量、成交额、换手率、
+市盈率、市净率、总市值、流通市值、开高低收和同步时间。数据源是新浪财经公开行情
+接口；该接口不是官方稳定合约，可能限流或变更，不能作为交易指令或唯一决策依据。
+
+这一步建立的是全市场**基础信息与最新行情快照**。历史日K仍需从已部署的InStock或
+其他经允许的数据源取得，再交给 `validate / indicators / report` 处理。
 
 ### 退出码
 

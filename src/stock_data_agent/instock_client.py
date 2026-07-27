@@ -4,12 +4,11 @@ import hashlib
 import json
 import re
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from urllib.parse import urljoin, urlparse
 
 import requests
-
 
 OADATE_RE = re.compile(r"^/OADate\((-?\d+(?:\.\d+)?)\)/$")
 
@@ -91,7 +90,7 @@ class InStockClient:
             raise ValueError(f"expected JSON response, got {content_type!r}")
         payload = response.json()
         if not isinstance(payload, list):
-            raise ValueError(f"expected top-level list, got {type(payload).__name__}")
+            raise TypeError(f"expected top-level list, got {type(payload).__name__}")
         decoded = _decode_oadates(payload)
         metadata = {
             "fetched_at": datetime.now().astimezone().isoformat(),
@@ -137,6 +136,6 @@ def _decode_oadates(value):
     if isinstance(value, str):
         match = OADATE_RE.match(value)
         if match:
-            origin = datetime(1899, 12, 30)
+            origin = datetime(1899, 12, 30, tzinfo=UTC)
             return (origin + timedelta(days=float(match.group(1)))).date().isoformat()
     return value

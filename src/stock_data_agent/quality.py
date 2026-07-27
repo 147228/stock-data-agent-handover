@@ -8,7 +8,6 @@ import pandas as pd
 
 from .freshness import FreshnessResult
 
-
 DEFAULT_REQUIRED_COLUMNS = ["code", "date", "open", "high", "low", "close", "volume"]
 
 

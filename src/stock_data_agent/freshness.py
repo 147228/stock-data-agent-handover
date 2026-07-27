@@ -1,9 +1,9 @@
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import asdict, dataclass
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
-from typing import Iterable
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -38,7 +38,7 @@ class TradingCalendar:
         return "exchange_calendar" if self._open_dates is not None else "weekday_only"
 
     @classmethod
-    def from_csv(cls, path: str | Path) -> "TradingCalendar":
+    def from_csv(cls, path: str | Path) -> TradingCalendar:
         frame = pd.read_csv(path, dtype={"date": "string"})
         required = {"date", "is_open"}
         missing = required - set(frame.columns)

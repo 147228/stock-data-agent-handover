@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import sqlite3
 import sys
 from datetime import datetime, time
 from pathlib import Path
@@ -13,6 +14,7 @@ import requests
 import yaml
 
 from . import __version__
+from .a_share_universe import fetch_a_share_universe, write_a_share_database
 from .freshness import TradingCalendar, evaluate_freshness
 from .indicators import compute_indicators, latest_snapshot
 from .instock_client import InStockClient, InStockConfig
@@ -39,7 +41,7 @@ def _load_config(path: str | Path | None) -> dict:
         return {}
     value = yaml.safe_load(Path(path).read_text(encoding="utf-8")) or {}
     if not isinstance(value, dict):
-        raise ValueError("config root must be a mapping")
+        raise TypeError("config root must be a mapping")
     return value
 
 
@@ -185,6 +187,24 @@ def command_report(args: argparse.Namespace) -> int:
     return 0 if quality.ok else 2
 
 
+def command_sync_a_share_universe(args: argparse.Namespace) -> int:
+    records, metadata = fetch_a_share_universe(
+        timeout_seconds=args.timeout,
+        page_size=args.page_size,
+        max_pages=args.max_pages,
+    )
+    manifest = write_a_share_database(
+        records,
+        metadata,
+        database=args.database,
+        min_rows=args.min_rows,
+    )
+    if args.manifest:
+        _write_json(args.manifest, manifest)
+    print(json.dumps({"ok": True, **manifest}, ensure_ascii=False, indent=2))
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="stock-data-agent",
@@ -225,6 +245,18 @@ def build_parser() -> argparse.ArgumentParser:
     report.add_argument("--now", help="ISO-8601 time used for deterministic freshness checks")
     report.add_argument("--write-indicators-on-failure", action="store_true")
     report.set_defaults(func=command_report)
+
+    universe = sub.add_parser(
+        "sync-a-share-universe",
+        help="fetch the real Shanghai/Shenzhen/Beijing A-share universe into SQLite",
+    )
+    universe.add_argument("--database", default="data/a_share.db")
+    universe.add_argument("--manifest")
+    universe.add_argument("--timeout", type=float, default=15.0)
+    universe.add_argument("--page-size", type=int, default=100)
+    universe.add_argument("--max-pages", type=int, default=100)
+    universe.add_argument("--min-rows", type=int, default=4_000)
+    universe.set_defaults(func=command_sync_a_share_universe)
     return parser
 
 
@@ -232,7 +264,14 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
         return int(args.func(args))
-    except (OSError, ValueError, PermissionError, requests.RequestException) as exc:
+    except (
+        OSError,
+        TypeError,
+        ValueError,
+        PermissionError,
+        requests.RequestException,
+        sqlite3.Error,
+    ) as exc:
         print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False), file=sys.stderr)
         return 2
 
