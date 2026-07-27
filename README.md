@@ -1,161 +1,88 @@
 # 股票数据分析 Agent 接手包
 
-这是新奥机器人股票数据能力的脱敏接手仓库。它从 [myhhub/stock](https://github.com/myhhub/stock)（InStock）开始，说明当前生产部署、数据获取、数据质量、新鲜度判断、指标计算、Agent 调用、故障处置和验收方法，并提供一套可测试的通用工具代码。
+一套**不含任何选股策略**的股票数据工具。它只干四件事：
 
-> 范围只有股票数据与确定性分析。本仓库不包含新闻分析，不包含任何私有选股/交易策略、参数、候选清单、回测结论、私有提示词、收件人标识或密钥，也不执行真实交易。
+1. 检查数据服务活没活；
+2. 检查数据是不是最新交易日的（不新鲜就拦住，不让下游发消息）；
+3. 检查数据本身有没有毛病（缺字段、重复、负价格、OHLC 逻辑错乱）；
+4. 算出通用技术指标，并留下一份可复查的 `manifest.json`。
 
-## 1. 接手结论
+基于开源项目 [myhhub/stock](https://github.com/myhhub/stock)（InStock）。
 
-接手难度为**中等**：
+> 只做数据和确定性计算。不含私有策略、参数、候选清单、新闻分析、密钥，也不执行任何交易。
 
-- 只读查询、健康检查、运行现成分析：熟悉 SSH、Docker、Python 和 systemd 的 Agent 通常半天可以开始值守。
-- 稳定维护数据链和可复现分析：通常需要 1—2 个工作日熟悉字段、交易日、新鲜度和供应商异常。
-- 新增生产级数据管道：通常需要 3—5 个工作日完成数据字典、测试、调度、监控、回滚和验收。
+---
 
-机器资源足以承载当前日频刷新、数十只标的盘中监测、中小规模指标计算和单 Agent 查询。主要风险不是算力，而是：
+## 一、最快的用法：直接丢给 Agent
 
-1. 公共数据源会超时、返回空对象或变更字段。
-2. 容器健康不代表数据已经刷新。
-3. 交易日和数据可用时间判断错误，会把旧数据写成“今天”。
-4. 大模型如果跳过确定性计算，容易补造字段或误读口径。
+不用会写代码。开一个 Agent 对话框，把仓库地址和需求一起丢进去就行：
 
-## 2. 当前必须先处理的 P0
+![把仓库丢给 Agent](docs/images/01-ask-agent.png)
 
-现场快照时间为 2026-07-21（Asia/Shanghai）：
-
-- 2026-07-17、2026-07-20 的 InStock 核心刷新在数据处理阶段提前失败。
-- 2026-07-21 的开盘提醒仍引用 2026-07-16 的旧清单。
-- InStock Web、数据库容器和只读适配器本身仍可访问。
-
-因此，新 Agent 的第一项生产改造不是增加新指标，而是落地 `freshness gate`：
+把下面这段复制给你的 Agent（TRAE Work / Claude Code / Codex 都行）：
 
 ```text
-服务健康 + 数据达到最近应有交易日 + 核心刷新成功 -> fresh -> 允许下游
-数据日期落后                                      -> stale -> 禁止正常下游
-无法取得数据日期或刷新状态                         -> unknown -> 禁止正常下游
+请阅读这个仓库：https://github.com/147228/stock-data-agent-handover
+按顺序做三件事：
+
+1. 读 README 和 docs/ 下的 7 篇文档，搞清楚这套工具有哪些命令、
+   哪些边界不能碰（尤其是 docs/07-SECURITY-BOUNDARY.md）。
+2. 在本地 clone 下来，建 venv，pip install -e '.[dev]'，跑 pytest，
+   确认 14 个测试全绿。
+3. 用 examples/ohlcv_sample.csv 跑通 validate -> indicators -> report 三步，
+   把 outputs/run-001/manifest.json 里的 freshness、row_count、input_sha256
+   讲给我听。
+
+规矩：freshness 是 stale 或 unknown 时必须直接告诉我并停下，
+不许自己补数据、不许猜、不许给买卖建议。
 ```
 
-`stale` 或 `unknown` 时必须 fail closed：只发数据异常告警，不发正常推荐或实时提醒。
-
-本仓库的 `stock-data-agent report` 已实现基础闸门；生产接入时还要把 InStock 核心刷新退出状态加入最终判定。
-
-## 3. 仓库内容
+跑完这一遍就算入门。之后可以直接对话提问：
 
 ```text
-.
-├── README.md
-├── config.example.yaml
-├── pyproject.toml
-├── docs/
-│   ├── 01-INSTOCK-BASELINE.md
-│   ├── 02-DATA-PIPELINE.md
-│   ├── 03-DATA-CONTRACT.md
-│   ├── 04-ANALYSIS-SOP.md
-│   ├── 05-PRODUCTION-RUNBOOK.md
-│   ├── 06-AGENT-HANDOFF.md
-│   └── 07-SECURITY-BOUNDARY.md
-├── src/stock_data_agent/
-│   ├── cli.py
-│   ├── freshness.py
-│   ├── indicators.py
-│   ├── instock_client.py
-│   └── quality.py
-├── examples/ohlcv_sample.csv
-└── tests/
+用 stock-data-agent report 跑一下 data/today.csv，
+告诉我：数据日期是哪天、freshness 是什么状态、质检有没有报错、
+最新一天的 MACD 柱和量比分别是多少。
+如果 freshness 不是 fresh，只报告问题，不要给我任何个股结论。
 ```
 
-文档阅读顺序：
+---
 
-1. [InStock 基线与当前部署](docs/01-INSTOCK-BASELINE.md)
-2. [数据管道与职责边界](docs/02-DATA-PIPELINE.md)
-3. [数据契约](docs/03-DATA-CONTRACT.md)
-4. [数据分析 SOP](docs/04-ANALYSIS-SOP.md)
-5. [生产值守与故障处理](docs/05-PRODUCTION-RUNBOOK.md)
-6. [Agent 接手规范](docs/06-AGENT-HANDOFF.md)
-7. [安全和脱敏边界](docs/07-SECURITY-BOUNDARY.md)
+## 二、安装
 
-## 4. 从 myhhub/stock 开始理解
-
-InStock 是开源股票数据与分析系统，上游具备日线/ETF 数据采集、技术指标和形态计算、数据筛选、验证/回测、Web 界面、数据库存储、批处理和可选交易模块。
-
-本机使用方式与上游默认部署不同：
-
-- InStock 被当作独立数据与计算子系统，不直接作为大模型知识。
-- Web 只监听 `127.0.0.1:9988`，不对公网开放。
-- MariaDB 不发布宿主机端口。
-- 交易服务关闭。
-- 生产目录带宿主机覆盖层，不能直接删除后照搬上游重装。
-- 为降低公共数据源压力，主要在工作日收盘后刷新。
-- 机器人通过批准的只读适配器获得结构化结果。
-
-本仓库核对的上游基线：
-
-```text
-repository: myhhub/stock
-commit: b6e0ca2268cfbadd02f5ed052159c187b6670231
-commit time: 2026-04-02T10:25:44+08:00
-license: Apache-2.0
-```
-
-上游将来可能变化；升级时以 Git commit 和容器镜像摘要为准，不用“最新版”作为可审计版本号。
-
-## 5. 当前生产架构
-
-```text
-用户 / 微信
-    |
-    v
-OpenClaw hawkeye001 (127.0.0.1:6701)
-    |  意图识别、权限判断、结果解释
-    v
-批准的只读股票适配器
-    |  健康、字段覆盖、结构化结果
-    v
-InStock Web/API (127.0.0.1:9988)
-    |
-    +-- InStock 应用容器
-    +-- MariaDB 容器（仅内部网络）
-    +-- 公共数据源 / 缓存 / 工作日刷新
-
-独立支路：开盘监测定时器 -> 实时行情检查 -> 微信提醒
-隔离支路：私有业务策略层 -> 所有者管理，本仓库不接触
-```
-
-关键路径：
-
-| 对象 | 路径 | 用途 |
-|---|---|---|
-| InStock 部署 | `/opt/instock` | Compose、覆盖层、数据和运维说明 |
-| 运维说明 | `/opt/instock/README.ops.md` | 启停、状态、日志、健康检查 |
-| OpenClaw 实例 | `/opt/openclaw-bots/instances/hawkeye001` | 服务用户 HOME 和运行状态 |
-| Agent 工作区 | `/opt/openclaw-bots/instances/hawkeye001/clawd` | Agent 规则、工具和研究任务 |
-| 只读适配器 | `.../clawd/skills/instock-stock-screener/scripts/instock_screener.py` | 生产查询入口 |
-| 密钥目录 | `/opt/instock/secrets` | 仅授权运维接触，不进入报告或仓库 |
-
-## 6. 运行本仓库工具
-
-要求 Python 3.11+。
+需要 **Python 3.11+**。
 
 ```bash
+git clone https://github.com/147228/stock-data-agent-handover.git
+cd stock-data-agent-handover
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install -e '.[dev]'
 pytest
 ```
 
-### 6.1 检查 InStock 是否在线
+`pytest` 应该输出 `14 passed`。装好后 `stock-data-agent` 命令即可用：
 
-在服务器本机或 SSH 隧道环境执行：
+```bash
+stock-data-agent --version     # 0.1.0
+stock-data-agent --help
+```
+
+---
+
+## 三、五条命令
+
+### ① `health` — 看服务活没活
 
 ```bash
 stock-data-agent health --base-url http://127.0.0.1:9988
 ```
 
-这只证明 Web 可达，不证明数据最新。
+**注意：这只证明网页能打开，不证明数据是今天的。** 这是这套东西里最容易踩的坑——容器全绿、页面正常，但数据还停在三天前。判断数据新不新鲜，要看下面的 `validate --check-freshness`。
 
-### 6.2 读取批准的 InStock 数据模块
+服务不通时退出码为 `2`。
 
-InStock 上游提供只读 GET 数据接口：`/instock/api_data?name=<module>&date=<date>`。接口没有足够的生产级鉴权，因此本工具默认只允许回环地址，并要求模块名出现在配置白名单中。
+### ② `fetch-module` — 拉一份已批准的数据模块
 
 先复制配置：
 
@@ -163,7 +90,23 @@ InStock 上游提供只读 GET 数据接口：`/instock/api_data?name=<module>&d
 cp config.example.yaml config.yaml
 ```
 
-由所有者/运维人员在 `allowed_modules` 中填写已经批准的数据模块。不要把私有模块名写入公共文档。
+`config.yaml` 各字段含义：
+
+```yaml
+instock:
+  base_url: "http://127.0.0.1:9988"
+  timeout_seconds: 10
+  max_response_bytes: 20000000    # 超过这个大小直接拒收，防止拖垮内存
+  allow_remote: false             # false = 只允许 127.0.0.1 / localhost / ::1
+  allowed_modules: []             # 留空 = fetch-module 一律拒绝
+
+analysis:
+  timezone: "Asia/Shanghai"
+  daily_ready_time: "17:45"       # 当天数据几点之后才算“应该有了”
+  trading_calendar: null          # 交易日历 CSV 路径，见下方说明
+```
+
+`allowed_modules` 由所有者/运维填写已批准的只读模块名。**不要把私有模块名写进公开文档。**
 
 ```bash
 stock-data-agent fetch-module \
@@ -173,29 +116,81 @@ stock-data-agent fetch-module \
   --output data/raw/module-2026-07-21.json
 ```
 
-工具只执行 GET、限制响应体大小、拒绝未批准模块，并在快照旁写元数据。生产 Agent 不应直接向 MariaDB 拼 SQL。
+工具只发只读 GET、不跟随重定向、限制响应体大小、拒绝白名单外的模块，并在快照旁边写一份元数据文件（记录来源、时间、哈希）。
 
-### 6.3 质检 OHLCV
+**不要绕过它直接连 MariaDB 拼 SQL。**
 
-CSV 至少包含：`code,date,open,high,low,close,volume`。可选字段包括 `amount,turnover_rate,adj_factor,source`。
+远程访问默认被拦：`remote InStock URL is blocked; use SSH tunnel or explicit allow_remote`。正确做法是开 SSH 隧道后仍然访问 `127.0.0.1`，而不是把 `allow_remote` 改成 `true`。
+
+### ③ `validate` — 体检 CSV
+
+输入 CSV 必须包含这 7 列：`code,date,open,high,low,close,volume`
+可选列：`amount,turnover_rate,adj_factor,source`
 
 ```bash
 stock-data-agent validate \
   --input examples/ohlcv_sample.csv \
-  --output outputs/quality.json
+  --output outputs/quality.json \
+  --check-freshness \
+  --now 2026-07-21T18:00:00+08:00
 ```
 
-质检包括：
+`--now` 用来固定“现在几点”，方便复现和写测试；日常使用可以不加，工具会用系统时间。
 
-- 必填字段和类型；
-- `code + date` 重复；
-- OHLC 逻辑关系；
-- 负数价格/成交量；
-- 每个标的日期单调性；
-- 数据最大日期和新鲜度；
-- 字段覆盖率和错误样本。
+数据正常时的输出（节选）：
 
-### 6.4 计算通用指标
+```json
+{
+  "ok": true,
+  "row_count": 37,
+  "symbol_count": 1,
+  "actual_as_of": "2026-07-21",
+  "missing_columns": [],
+  "field_coverage": { "close": 100.0, "volume": 100.0, "amount": 100.0 },
+  "duplicate_key_rows": 0,
+  "invalid_ohlc_rows": 0,
+  "negative_value_rows": 0,
+  "non_monotonic_symbols": [],
+  "freshness": {
+    "status": "fresh",
+    "actual_as_of": "2026-07-21",
+    "expected_as_of": "2026-07-21",
+    "calendar_quality": "weekday_only",
+    "reason": "actual_as_of meets the expected daily date"
+  },
+  "errors": []
+}
+```
+
+同一份数据，6 天后再跑一次：
+
+```json
+{
+  "ok": false,
+  "freshness": {
+    "status": "stale",
+    "actual_as_of": "2026-07-21",
+    "expected_as_of": "2026-07-27",
+    "reason": "data is behind by at least 6 calendar day(s)"
+  },
+  "errors": ["freshness gate failed: stale"]
+}
+```
+
+此时退出码是 `2`，cron / systemd 会自动卡住下游任务。
+
+**关于 `calendar_quality`：** 不配 `trading_calendar` 时是 `weekday_only`——只按周一到周五算，**不认识法定节假日**，所以长假后第一天容易误判。生产环境请提供一份 `date,is_open` 两列的 CSV：
+
+```csv
+date,is_open
+2026-07-20,1
+2026-07-21,1
+2026-07-22,0
+```
+
+配上之后 `calendar_quality` 会变成 `exchange_calendar`，这才是可信的证据等级。
+
+### ④ `indicators` — 算通用指标
 
 ```bash
 stock-data-agent indicators \
@@ -203,9 +198,20 @@ stock-data-agent indicators \
   --output outputs/indicators.csv
 ```
 
-工具提供 SMA、EMA、MACD、RSI、ATR、成交量均值与量比等通用指标。它不内置筛选阈值、不排序推荐股票、不生成买卖信号。
+在原始列后面追加这些列：
 
-### 6.5 一次完成质检、闸门和指标分析
+```text
+sma_5  sma_10  sma_20  ema_12  ema_26
+macd  macd_signal  macd_hist
+rsi_14  atr_14
+volume_ma_5  volume_ratio_5
+```
+
+前若干行因为窗口不够会是空值，这是正常的，**不要拿空值当 0 用**。
+
+它**不排序、不筛选、不推荐、不给买卖信号**——阈值和策略是使用者自己的事，不进这个仓库。
+
+### ⑤ `report` — 一条命令跑完全套（推荐）
 
 ```bash
 stock-data-agent report \
@@ -214,42 +220,78 @@ stock-data-agent report \
   --now 2026-07-21T18:00:00+08:00
 ```
 
-输出：
+产出四个文件：
 
 ```text
 outputs/run-001/
-├── quality.json
-├── indicators.csv
-├── latest_snapshot.csv
-└── manifest.json
+├── quality.json         # 完整质检结果
+├── indicators.csv       # 全量指标
+├── latest_snapshot.csv  # 每只票最新一行（日常看盘只看这个就够）
+└── manifest.json        # 审计凭证
 ```
 
-`manifest.json` 记录：运行时间、输入哈希、行数、数据日期、freshness、工具版本和输出文件。质检错误或 stale/unknown 时命令返回非零退出码，便于 systemd/cron 阻断下游。
-
-## 7. 每次数据分析必须遵守的流程
-
-```text
-明确问题
-  -> 固定市场/代码/时间/频率/复权/时点
-  -> 检查服务健康
-  -> 获取原始快照并记录来源
-  -> 验证新鲜度和字段覆盖
-  -> 质量检查
-  -> 确定性脚本计算
-  -> 验证无未来数据/口径错误
-  -> 生成 manifest 和结果
-  -> Agent 区分事实、分析、限制、建议
-```
-
-标准结果至少包含：
+`manifest.json` 长这样——**这是整套东西里最该留档的文件**，有它才能回答“这个结论是基于哪天、哪份数据、哪个版本算出来的”：
 
 ```json
 {
-  "query_time": "ISO-8601 with timezone",
+  "tool": "stock-data-agent",
+  "version": "0.1.0",
+  "run_time": "2026-07-21T18:02:11+08:00",
+  "input": "examples/ohlcv_sample.csv",
+  "input_sha256": "2b6d097122c83349e93a9d45ffb97dfec3ca5c98cedae80391bc7d5be0e496f3",
+  "row_count": 37,
+  "symbol_count": 1,
+  "freshness": { "status": "fresh", "actual_as_of": "2026-07-21" },
+  "quality_ok": true,
+  "outputs": { "quality": "...", "indicators": "...", "latest_snapshot": "..." }
+}
+```
+
+质检报错时默认不写 indicators（避免脏数据流下去）。确实要看中间结果时加 `--write-indicators-on-failure`。
+
+### 退出码
+
+| 码 | 含义 | 建议动作 |
+|---|---|---|
+| `0` | 一切正常 | 放行下游 |
+| `2` | 服务不通 / 质检失败 / freshness 为 stale 或 unknown | **拦截下游**，只发数据异常告警 |
+
+在 cron 里直接串起来即可：
+
+```bash
+stock-data-agent report --config config.yaml \
+  --input data/today.csv --output-dir outputs/$(date +%F) \
+  && ./notify.sh outputs/$(date +%F)/latest_snapshot.csv \
+  || ./alert.sh "股票数据异常，今日不发送任何提醒"
+```
+
+---
+
+## 四、三条不能破的规矩
+
+### 1. 数据不新鲜就不许往下走（freshness gate）
+
+```text
+服务健康 + 数据到了最近应有的交易日 + 刷新成功  ->  fresh    ->  放行
+数据日期落后                                  ->  stale   ->  拦截
+拿不到数据日期或刷新状态                        ->  unknown ->  拦截
+```
+
+`stale` / `unknown` 时**只发数据异常告警，不发任何推荐、提醒或个股结论**。宁可少发一条，不能发错一条。
+
+注意：仓库自带的闸门只看“数据日期”。接进生产时，还要把 InStock 核心刷新任务的退出状态一起纳入判定——刷新失败但库里还留着昨天的数据时，光看日期可能照样过。
+
+### 2. 缺数据就说缺，不许猜
+
+任何结论都必须带上 `as_of`（数据日期）、来源、字段覆盖率。三者缺一，就不能当成确定性结论输出。标准结果格式：
+
+```json
+{
+  "query_time": "ISO-8601 带时区",
   "as_of": "YYYY-MM-DD",
-  "source": "actual source or cache",
-  "scope": "market, symbols and date range",
-  "method": "tool and version",
+  "source": "真实来源或缓存",
+  "scope": "市场、代码、时间范围",
+  "method": "工具名和版本",
   "row_count": 0,
   "field_coverage": {},
   "freshness": "fresh|stale|unknown",
@@ -258,108 +300,99 @@ outputs/run-001/
 }
 ```
 
-如果没有 `as_of`、来源或字段覆盖，Agent 不能把结果包装成确定性结论。
+### 3. 事实、分析、建议分开写
 
-## 8. Agent 的职责
-
-接手 Agent 负责：
-
-- 数据服务和只读接口健康检查；
-- 数据新鲜度、字段覆盖和异常检测；
-- 用确定性程序计算指标和统计；
-- 记录数据日期、来源、口径、输入哈希和工具版本；
-- 把工具结果解释成清晰回答；
-- 遇到 stale/unknown 时阻断正常下游并告警；
-- 形成可复现、可审计的分析工作区。
-
-接手 Agent 不负责：
-
-- 私有选股或交易策略；
-- 候选清单和策略参数；
-- 新闻分析；
-- 微信收件人和主动发送权限；
-- 券商连接、订单和真实交易；
-- 密钥、Cookie、Token 的读取或输出。
-
-## 9. 生产值守快速命令
-
-```bash
-# 主机
-ssh yinxing-1
-date -Is
-uptime
-free -h
-df -h /
-
-# InStock
-sudo docker compose -f /opt/instock/compose.yaml ps
-sudo docker compose -f /opt/instock/compose.yaml logs --tail=200 app
-sudo docker compose -f /opt/instock/compose.yaml logs --tail=200 db
-curl -fsS -o /dev/null -w '%{http_code}\n' http://127.0.0.1:9988/
-
-# 生产只读适配器
-python3 /opt/openclaw-bots/instances/hawkeye001/clawd/skills/instock-stock-screener/scripts/instock_screener.py health
-python3 /opt/openclaw-bots/instances/hawkeye001/clawd/skills/instock-stock-screener/scripts/instock_screener.py self-test
-```
-
-`self-test` 使用合成样本，只证明代码路径可以运行，不证明生产数据最新。
-
-更多命令见 [生产 Runbook](docs/05-PRODUCTION-RUNBOOK.md)。
-
-## 10. 新分析任务目录
-
-```text
-/opt/openclaw-bots/instances/hawkeye001/clawd/research/<new-task>/
-├── README.md
-├── requirements.txt
-├── config.example.yaml
-├── data/
-│   ├── raw/          # 原始快照，只读
-│   └── processed/    # 清洗和衍生数据
-├── src/              # 获取、清洗、计算、报告
-├── tests/            # 单元测试和数据断言
-├── outputs/          # CSV/JSON/图表/报告
-└── validation.json   # 时间、日期、哈希、行数和检查结果
-```
-
-新 Agent 必须新建目录，不遍历、复用或概括所有者现有私有研究目录。
-
-## 11. 接手验收
-
-完成以下演示才算可独立值守：
-
-- 解释 InStock、MariaDB、只读适配器、OpenClaw 和监测任务之间的关系。
-- 在不输出秘密的情况下完成主机、容器、端口和接口检查。
-- 识别“服务健康但数据过期”，并阻断正常下游。
-- 对合成数据完成 `validate -> indicators -> report`。
-- 处理空响应、缺字段、重复数据和 OHLC 错误，不让模型补造。
-- 为一次新分析生成 `manifest.json` 和输入哈希。
-- 区分事实、分析和建议，不做收益保证。
-- 给出不含策略、候选、密钥和收件人标识的值守报告。
-
-## 12. 当前容量边界
-
-当前服务器约 15 GiB 内存、根盘使用率约 17%，适合日频数据、数十只标的盘中监测和轻量历史分析。以下任务应拆分或限流：
-
-- 分钟级全市场持续抓取；
-- 多 Agent 重复扫描全市场；
-- 大量参数网格或机器学习训练；
-- 在生产 MariaDB 上执行长时间无索引查询。
-
-建议共享行情快照、缓存中间结果、队列化重任务、限制并发和内存；重型研究放到离线工作区或独立计算机。
-
-## 13. 脱敏确认
-
-发布前运行：
-
-```bash
-rg -n '(token|password|secret|cookie|wxid|recipient)' . \
-  -g '!README.md' -g '!docs/07-SECURITY-BOUNDARY.md'
-git diff --cached
-```
-
-发现真实值立即停止提交。仅出现字段名、示例占位符或安全说明不代表泄密，但仍需人工复核。
+工具算出来的是**事实**，你的解读是**分析**，两者不能混着讲，更不能做收益保证。写报告时分三段，读的人才知道哪部分能信。
 
 ---
 
-状态说明：本仓库的现场信息只对 2026-07-21 有效；每次接手和事故汇报必须重新读取生产状态，不得照抄旧快照。
+## 五、Agent 能做什么、不能做什么
+
+| 能做 | 不能做 |
+|---|---|
+| 健康检查、新鲜度校验、异常检测 | 私有选股 / 交易策略、参数 |
+| 用确定性程序算指标和统计 | 候选清单、回测结论 |
+| 记录数据日期、来源、口径、哈希、版本 | 新闻分析 |
+| 把工具结果翻译成人话 | 微信收件人、主动发送 |
+| stale / unknown 时拦截下游并告警 | 券商连接、下单、真实交易 |
+| 为新任务新建独立分析目录 | 读取或输出密钥 / Cookie / Token |
+
+新任务请**新建目录**，标准结构：
+
+```text
+research/<new-task>/
+├── README.md
+├── config.example.yaml
+├── data/raw/          # 原始快照，只读，不要就地修改
+├── data/processed/    # 清洗和衍生数据
+├── src/               # 获取、清洗、计算、报告
+├── tests/             # 单元测试和数据断言
+├── outputs/           # CSV / JSON / 图表 / 报告
+└── validation.json    # 时间、日期、哈希、行数、检查结果
+```
+
+**不要去翻、复用或概括已有的私有研究目录。**
+
+---
+
+## 六、让它每天自动跑
+
+数据每天在变，但不用每天手动喊它更新。在 Agent 的定时任务面板里建一条就行——不用写 crontab，用大白话描述要做什么：
+
+![配置定时任务](docs/images/02-scheduled-task.png)
+
+说清楚三件事即可：**什么时候跑**（每个交易日收盘后）、**跑什么**（同步数据 + 跑 report）、**跑完怎么通知你**。
+
+任务描述可以直接抄这段：
+
+```text
+每周一到周五 19:00 执行：
+
+1. 把最新行情同步到本地 data/today.csv
+2. 运行 stock-data-agent report --config config.yaml \
+     --input data/today.csv --output-dir outputs/<今天日期>
+3. 打开 outputs/<今天日期>/manifest.json，检查 freshness 字段：
+   - fresh   -> 生成 HTML 报告并告诉我结果
+   - stale / unknown -> 只告诉我"数据未更新"，不要生成任何选股结论
+4. 完成后通知我
+```
+
+第 3 步是重点：**把 freshness 判断写进任务描述里**，否则数据没刷新时它照样会给你一份看起来很正常的报告。
+
+想上线成一个固定网址（手机上随时能打开、也方便发给别人看）时，让 Agent 把 `outputs/` 下的 HTML 报告一并推到你自己的服务器，并加上访问密码。
+
+---
+
+## 七、常见问题
+
+| 现象 | 原因 | 处理 |
+|---|---|---|
+| `remote InStock URL is blocked` | `base_url` 不是回环地址 | 开 SSH 隧道后仍访问 `127.0.0.1`，别改 `allow_remote` |
+| `fetch-module` 报模块未批准 | `allowed_modules` 是空的 | 找运维加白名单，不要自己填 |
+| `response exceeds configured max_response_bytes` | 拉的范围太大 | 缩小日期区间分批拉 |
+| `health` 通过但结论全是旧的 | 服务活着 ≠ 数据刷新了 | 用 `validate --check-freshness` 复核 |
+| 长假后第一天判成 `stale` | 用的是 `weekday_only` 日历 | 配上 `trading_calendar` CSV |
+| `indicators.csv` 前几十行是空的 | 均线窗口还没攒够数据 | 正常现象，别拿空值当 0 |
+| `report` 退出码 2 但没看到 indicators | 质检失败时默认不写 | 加 `--write-indicators-on-failure` 排查 |
+
+---
+
+## 八、想深入了解
+
+按顺序读：
+
+1. [InStock 基线与当前部署](docs/01-INSTOCK-BASELINE.md)
+2. [数据管道与职责边界](docs/02-DATA-PIPELINE.md)
+3. [数据契约](docs/03-DATA-CONTRACT.md)
+4. [数据分析 SOP](docs/04-ANALYSIS-SOP.md)
+5. [生产值守与故障处理](docs/05-PRODUCTION-RUNBOOK.md)
+6. [Agent 接手规范](docs/06-AGENT-HANDOFF.md)
+7. [安全和脱敏边界](docs/07-SECURITY-BOUNDARY.md)
+
+---
+
+## 风险提示
+
+本仓库仅提供数据处理与通用技术指标计算，**不构成任何投资建议**。数据来自公共数据源，可能存在延迟、缺失或错误，请独立判断并自行承担投资风险。
+
+仓库内的现场信息只对快照日期有效。每次接手和事故汇报请重新读取生产状态，不要照抄旧快照。
